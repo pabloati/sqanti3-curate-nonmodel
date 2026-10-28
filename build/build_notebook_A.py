@@ -234,7 +234,7 @@ The rules live in a JSON file. This example says *keep an isoform if it has no i
 
 - **Top-level keys are structural categories** (`full-splice_match`, `novel_not_in_catalog`…). `"rest"` covers every category without its own rules. Today everything is intergenic, so we only use `"rest"`.<br>⚠️ Always include a `"rest"` key: in SQANTI3 v6.1, isoforms in categories without rules are discarded.
 - **Inside a block, every condition must hold** (AND).
-- **Between blocks, passing any one is enough** (OR). This is what lets us *rescue* isoforms.
+- **Between blocks, passing any one is enough** (OR). This is what lets a *relaxed* rule bring isoforms back.
 - **Values:** `[min, max]` is a range, a single number is a minimum, and text must match exactly.
 - **A missing value (NA) fails the condition**, except that junction conditions (`all_canonical`, `RTS_stage`, `predicted_NMD`, `min_cov`…) are skipped for mono-exonic isoforms.
 """)
@@ -296,9 +296,12 @@ With few reads, a flagged isoform is almost always an artifact. **With 50 reads 
 """)
 
 # ---------------------------------------------------------------- step 5
-md("## Step 5 · A second rule to rescue them")
+md("""
+## Step 5 · A relaxed rule to bring them back
+A **relaxed rule** is the strict rule with one condition relaxed, in exchange for strong read support.
+""")
 code('''
-rescue = {
+relaxed = {
     "rest": [
         strict["rest"][0],                  # block 1: the strict rule, unchanged
         {                                   # block 2: everything except the intrapriming check...
@@ -312,7 +315,7 @@ rescue = {
         }
     ]
 }
-score(rescue, "Strict + rescue (FL ≥ 10)")
+score(relaxed, "Strict + relaxed (FL ≥ 10)")
 plot_tradeoff()
 ''')
 md("""
@@ -321,7 +324,7 @@ md("""
 
 # ---------------------------------------------------------------- step 6
 md("""
-## Step 6 · Fine-tune the rescue
+## Step 6 · Fine-tune the relaxed rule
 Is 10 reads the right threshold? Move the slider. The faint line shows every threshold from 2 to 200 reads.
 """)
 code('''
@@ -329,7 +332,7 @@ import ipywidgets as widgets
 
 curve = []
 for fl in [2, 3, 4, 5, 7, 10, 15, 20, 30, 50, 75, 100, 150, 200]:
-    block2 = dict(rescue["rest"][1], FL=fl)
+    block2 = dict(relaxed["rest"][1], FL=fl)
     keep = sqanti_rules(classif, {"rest": [strict["rest"][0], block2]})
     good = (keep & real).sum()
     curve.append(dict(FL=fl, recovered=100 * good / N_REAL, precision=100 * good / keep.sum()))
@@ -338,7 +341,7 @@ curve = pd.DataFrame(curve)
 @widgets.interact(min_reads=widgets.IntSlider(value=10, min=2, max=200, step=1, continuous_update=False,
                                               description="FL ≥"))
 def tune(min_reads):
-    block2 = dict(rescue["rest"][1], FL=min_reads)
+    block2 = dict(relaxed["rest"][1], FL=min_reads)
     score({"rest": [strict["rest"][0], block2]}, "Your FL threshold")
     plot_tradeoff(curve=curve, highlight="Your FL threshold")
 ''')
@@ -348,7 +351,7 @@ There is no single right answer. If the transcripts become **hints for a gene pr
 
 # ---------------------------------------------------------------- step 7
 md("""
-## Step 7 · One rescue per risky condition
+## Step 7 · One relaxed rule per risky condition
 The same idea, applied to every condition that cost us real transcripts in Step 4: each extra block drops **one** condition and asks for ≥ 10 reads instead. This is the rule set we use in SQANTI-evidence to annotate genomes from long reads alone.
 """)
 code('''
@@ -374,7 +377,7 @@ Some ideas:
 - **Drop mono-exonic isoforms:** set `"exons": 2` in every block. Only 45 of the 5,124 mono-exonic isoforms are in WormBase.
 - **Add `"RTS_stage": "FALSE"`** to block 1. Does RT switching matter in this dataset?
 - **Make the protein check stricter or looser** (`psauron_score`, `CDS_length`).
-- **Add a rescue block for `predicted_NMD`**, or ask for more reads in a block.
+- **Add a relaxed block for `predicted_NMD`**, or ask for more reads in a block.
 """)
 code('''
 my_rules = {
@@ -445,7 +448,7 @@ display(pd.read_csv("filter_output/celegans_filtering_reasons.txt", sep="\\t").h
 md("""
 ## Wrap-up
 - **A single strict rule buys precision at the cost of real transcripts.** Several blocks let you say *"I accept this risk only when there's other support"*.
-- **In a low-evidence setting, read support (FL) is your best rescuer.** Check what it rescues before trusting it, as we did in Step 4.
+- **In a low-evidence setting, read support (FL) is your best ally.** Check what it brings back before trusting it, as we did in Step 4.
 - **"Not in WormBase" doesn't mean "artifact".** WormBase is incomplete and some of those isoforms are real novel ones, so the precision you saw here is a lower bound.
 
 **When you get more evidence, add it to the rules:**
