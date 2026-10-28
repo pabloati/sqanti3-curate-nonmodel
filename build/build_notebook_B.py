@@ -9,7 +9,6 @@ from pathlib import Path
 # Where the data and scripts are hosted
 REPO_RAW = "https://raw.githubusercontent.com/pabloati/sqanti3-curate-nonmodel/main"
 COLAB_URL = "https://colab.research.google.com/github/pabloati/sqanti3-curate-nonmodel/blob/main/rules_filter_activity_B.ipynb"
-IMAGES = "https://raw.githubusercontent.com/ConesaLab/courses-SQANTI_verse/main/data"
 
 cells = []
 
@@ -59,7 +58,7 @@ We will use two datasets:
   - [2.1 Rules](#21-rules)
   - [2.2 One strict rule](#22-one-strict-rule)
   - [2.3 Who did we lose?](#23-who-did-we-lose)
-  - [2.4 A rescue rule](#24-a-rescue-rule)
+  - [2.4 A relaxed rule](#24-a-relaxed-rule)
 - [3. Fine-tuning: the SQANTI-evidence rules](#3-fine-tuning-the-sqanti-evidence-rules)
   - [3.1 Your turn!](#31-your-turn)
 - [4. BONUS: a noisier dataset](#4-bonus-a-noisier-dataset)
@@ -108,7 +107,7 @@ chmod +x /usr/local/bin/conda
 
 conda create -y -q -n sqanti3 -c conda-forge -c bioconda sqanti3=6.1 > install.log 2>&1 \\
     && echo "SQANTI3 installed 🥳" || { echo "Something went wrong, check install.log"; tail install.log; }
-conda run -n sqanti3 sqanti3_filter.py --version
+conda run -n sqanti3 sqanti3_qc.py --version
 """)
 
 md("""
@@ -366,20 +365,66 @@ python scripts/score.py results/01_strict --key data/celegans_chrI_answer_key.ts
 """)
 
 md("""
+Tables are fine, but a picture is better. On the left, the same numbers as a figure. On the right, every discarded isoform is counted **once**: did it fail a single condition (and which one), or several? An isoform that failed only one condition is a candidate for a relaxed rule. One that failed several is almost certainly an artifact.
+
+> Note: in the right plot, a non-coding isoform counts as failing `coding` only. Its missing `CDS_length` and `psauron_score` are a consequence of having no ORF, so they are not counted again.
+""")
+
+code("""
+import sys
+import matplotlib.pyplot as plt
+sys.path.append("scripts")
+import score
+
+REAL, ARTIFACT, INK = "#2a78d6", "#eb6834", "#52514e"
+plt.rcParams.update({"axes.spines.top": False, "axes.spines.right": False, "axes.edgecolor": "#a3a29c",
+                     "axes.labelcolor": INK, "xtick.color": INK, "ytick.color": INK, "font.size": 10})
+
+def stacked_bars(ax, labels, real, artifact, title):
+    y = range(len(labels))[::-1]
+    ax.barh(y, real, color=REAL, height=0.7, label="Real (matches WormBase)")
+    ax.barh(y, artifact, left=real, color=ARTIFACT, height=0.7, label="Not real", edgecolor="white", linewidth=1)
+    for yi, r, a in zip(y, real, artifact):
+        ax.text(r + a + 15, yi, f"{r} real / {r + a}", va="center", fontsize=9, color=INK)
+    ax.set_yticks(list(y), labels)
+    ax.set_xlim(0, max(r + a for r, a in zip(real, artifact)) * 1.35)
+    ax.set_xlabel("Discarded isoforms")
+    ax.set_title(title, loc="left", fontsize=11, fontweight="bold")
+
+# Left: every isoform failing each condition (the table above)
+table = score.losses("results/01_strict", "data/celegans_chrI_answer_key.tsv")
+table = table.sort_values("Isoforms failing", ascending=False)
+
+# Right: one condition only (which one?) or several?
+discarded = score.reasons("results/01_strict", "data/celegans_chrI_answer_key.tsv", count_na=False)
+discarded["group"] = discarded["conditions"].apply(lambda cs: f"Only {cs[0]}" if len(cs) == 1 else "Two or more")
+groups = discarded.groupby("group")["real"].agg(real="sum", total="size").sort_values("total", ascending=False)
+groups = groups.loc[[g for g in groups.index if g != "Two or more"] + ["Two or more"]]
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 3.8), gridspec_kw={"wspace": 0.75})
+stacked_bars(ax1, table["Condition"].tolist(), table["Real among them"].tolist(),
+             (table["Isoforms failing"] - table["Real among them"]).tolist(), "Isoforms failing each condition")
+stacked_bars(ax2, groups.index.tolist(), groups["real"].astype(int).tolist(),
+             (groups["total"] - groups["real"]).astype(int).tolist(), "One condition only, or several?")
+ax1.legend(loc="lower right", frameon=False, fontsize=9)
+plt.show()
+""")
+
+md("""
 **❓Trivia:** Which condition throws away the most real transcripts? Can you think of a biological reason?
 
 <details><summary>Answer</summary>
 
-**Intrapriming** (`perc_A_downstream_TTS`): 1,051 isoforms fail it, 162 of them are real, and **157 real isoforms fail only that condition**. Many real genes simply have an A-rich stretch right after their 3′ end, so the intrapriming flag is a probability, not a certainty. The good news: a real isoform from a well-expressed gene is supported by many reads, while an intrapriming artifact usually is not.
+**Intrapriming** (`perc_A_downstream_TTS`): 1,051 isoforms fail it, 162 of them are real, and **157 real isoforms fail only that condition**. On the other side, of the 678 isoforms that fail two or more conditions, only 5 are real. Many real genes simply have an A-rich stretch right after their 3′ end, so the intrapriming flag is a probability, not a certainty. The good news: a real isoform from a well-expressed gene is supported by many reads, while an intrapriming artifact usually is not.
 </details><br>
 
-## 2.4 A rescue rule
+## 2.4 A relaxed rule
 
-Remember that the rules in a category are treated as **OR**? This is where they shine. We keep the strict rule, and we add a second one: **forgive the intrapriming flag, as long as at least 10 reads support the isoform**. Everything else stays the same.
+Remember that the rules in a category are treated as **OR**? This is where they shine. We keep the strict rule, and we add a second one: **forgive the intrapriming flag, as long as at least 10 reads support the isoform**. Everything else stays the same. We call this a **relaxed rule**: the strict rule with one condition relaxed, in exchange for strong read support.
 """)
 
 code("""
-%%writefile rules/02_rescue_intrapriming.json
+%%writefile rules/02_relax_intrapriming.json
 {
     "rest": [
         {
@@ -408,11 +453,11 @@ conda run -n sqanti3 \\
 sqanti3_filter.py rules \\
     --sqanti_class data/celegans_chrI_classification.txt \\
     --filter_gtf data/celegans_chrI_corrected.gtf \\
-    --json_filter rules/02_rescue_intrapriming.json \\
+    --json_filter rules/02_relax_intrapriming.json \\
     --skip_report --log_level WARNING \\
-    --dir results/02_rescue_intrapriming --output worm
+    --dir results/02_relax_intrapriming --output worm
 
-python scripts/score.py results/01_strict results/02_rescue_intrapriming --key data/celegans_chrI_answer_key.tsv
+python scripts/score.py results/01_strict results/02_relax_intrapriming --key data/celegans_chrI_answer_key.tsv
 """)
 
 md("""
@@ -423,7 +468,7 @@ md("""
 The second rule brought back **191 isoforms, and 118 of them are real** (62%, far above the 44% of the raw transcriptome). We now recover **94.8%** of the real transcripts instead of 86.7%, and the precision barely moves (67.2% → 66.7%). One extra rule, almost for free!
 </details><br>
 
-🥳 You just wrote your first rescue rule. Congrats!
+🥳 You just wrote your first relaxed rule. Congrats!
 """)
 
 # ---------------------------------------------------------------------------------------------
@@ -433,7 +478,7 @@ md("""
 We can apply the same trick to the other conditions that removed real transcripts. In SQANTI-evidence, the rules are built this way:
 
 1. **One strict rule**, with everything we would like a real isoform to have.
-2. **One rescue rule per "forgivable" condition**: the strict rule without that condition, but asking for at least 10 reads. Each rescue rule forgives **one** thing (intrapriming, a low PSAURON score, or a non-canonical junction), never two at the same time.
+2. **One relaxed rule per "forgivable" condition**: the strict rule without that condition, but asking for at least 10 reads. Each relaxed rule forgives **one** thing (intrapriming, a low PSAURON score, or a non-canonical junction), never two at the same time.
 """)
 
 code("""
@@ -470,7 +515,7 @@ sqanti3_filter.py rules \\
     --skip_report --log_level WARNING \\
     --dir results/03_sqanti_evidence --output worm
 
-python scripts/score.py results/01_strict results/02_rescue_intrapriming results/03_sqanti_evidence \\
+python scripts/score.py results/01_strict results/02_relax_intrapriming results/03_sqanti_evidence \\
     --key data/celegans_chrI_answer_key.tsv
 """)
 
@@ -514,18 +559,27 @@ plt.show()
 md("""
 ## 3.1 Your turn!
 
-Now it is your time to show all you have learned. Edit the rules below, run the two cells and **post your *Recovered* and *Precision* numbers in the chat**. Can you beat the SQANTI-evidence rules? Some ideas:
+Now it is your time to show all you have learned. The cell below only has the strict rule: **design your own set of rules**, run the two cells and **post your *Recovered* and *Precision* numbers in the chat**. Can you beat the SQANTI-evidence rules (95.5% recovered, 66.4% precision)?
 
+Remember that the two numbers pull in opposite directions, so think about which one matters more for you: a clean transcriptome, or not losing real transcripts. Some ideas:
+
+- **Add your own relaxed rules.** Which conditions removed real transcripts in the plots of section 2.3? How many reads would you ask for in exchange?
+- **Move the thresholds** instead of removing conditions: what happens with `"perc_A_downstream_TTS": [0, 69]`, or a different `psauron_score` or `CDS_length`?
 - **Drop the mono-exonic isoforms** by adding `"exons": 2` to every rule. How many real transcripts have a single exon?
 - **Add `"RTS_stage": "FALSE"`** to every rule. Does RT switching matter in this dataset?
-- **Make the protein check stricter or looser** (`psauron_score`, `CDS_length`).
-- **Ask for more (or fewer) reads** in the rescue rules.
+- **Ask for a minimum number of reads in every rule**, not only in the relaxed ones.
 
 <details>
 <summary>Click here if desperate (or lazy)</summary>
 
+All of these start from the SQANTI-evidence rules:
+
 - Adding `"exons": 2` to every rule gives **95.3% recovered and 68.2% precision**: only 3 of the 906 mono-exonic isoforms are real, so we lose almost nothing and the transcriptome gets cleaner.
+- Allowing up to 69% of A (`[0, 69]`) in every rule, together with `"exons": 2`, gives **96.8% recovered and 67.5% precision**.
 - Adding `"RTS_stage": "FALSE"` to every rule drops the recovery to **84.6%** with no gain in precision. Of the 289 multi-exon isoforms flagged for RT switching, 165 are real: in this dataset the flag removes more real transcripts than artifacts.
+- Asking for at least 10 reads in every rule (with `"exons": 2`) raises the precision to **73.4%**, but the recovery falls to **78.2%**. Depth is the only thing that still separates the real isoforms from the rest, and it costs a lot.
+
+Why is it so hard to go above ~68% precision without losing real transcripts? Most of the "not real" isoforms that survive belong to WormBase genes: they have a new junction, or extend a known transcript a bit. They look exactly like real isoforms to the filter, and some of them may well be real isoforms missing from WormBase.
 </details><br>
 """)
 
@@ -536,18 +590,6 @@ code("""
         {
             "perc_A_downstream_TTS": [0, 59], "all_canonical": "canonical",
             "coding": "coding", "CDS_length": 100, "psauron_score": 0.7, "predicted_NMD": "FALSE"
-        },
-        {
-            "all_canonical": "canonical",
-            "coding": "coding", "CDS_length": 100, "psauron_score": 0.7, "predicted_NMD": "FALSE", "FL": 10
-        },
-        {
-            "perc_A_downstream_TTS": [0, 59], "all_canonical": "canonical",
-            "coding": "coding", "CDS_length": 100, "predicted_NMD": "FALSE", "FL": 10
-        },
-        {
-            "perc_A_downstream_TTS": [0, 59],
-            "coding": "coding", "CDS_length": 100, "psauron_score": 0.7, "predicted_NMD": "FALSE", "FL": 10
         }
     ]
 }
@@ -608,7 +650,7 @@ md("""
 <details><summary>Answer</summary>
 
 - **60% of the zebrafish isoforms are mono-exonic** (3,060), and only 3 of them match Ensembl. In the worm they are 27%.
-- **The zebrafish isoforms have fewer reads**: a median of 4 reads per isoform, against 13 in the worm. Less depth means less evidence for each isoform, and the `FL` rescue rules can rescue less.
+- **The zebrafish isoforms have fewer reads**: a median of 4 reads per isoform, against 13 in the worm. Less depth means less evidence for each isoform, and the relaxed rules, which ask for at least 10 reads, can bring back fewer isoforms.
 - **Ensembl is not WormBase**: a real zebrafish transcript missing from Ensembl counts as "not real" here, so the true precision is higher than 35.9%.
 
 Adding `"exons": 2` to every rule raises the precision to 38.6% while keeping 88.1% of the real transcripts. Try it! The lesson: **the rules have to be tuned to your data**, and the noisier the data, the more the filter matters.
@@ -618,14 +660,12 @@ Adding `"exons": 2` to every rule raises the precision to 38.6% while keeping 88
 md("""
 # 5. Conclusion
 
-With this, you have reached the end of this tutorial 🥳. You have learned how to curate a long-read transcriptome when the only information you have comes from the reads and the genome: how the SQANTI3 rules are written (AND inside a rule, OR between rules), how to find out *why* isoforms are discarded with the filtering reasons, and how **rescue rules recover real transcripts** that a single strict rule throws away, at almost no cost in precision.
+With this, you have reached the end of this tutorial 🥳. You have learned how to curate a long-read transcriptome when the only information you have comes from the reads and the genome: how the SQANTI3 rules are written (AND inside a rule, OR between rules), how to find out *why* isoforms are discarded with the filtering reasons, and how **relaxed rules recover real transcripts** that a single strict rule throws away, at almost no cost in precision.
 
 In your own species, you will not have an answer key. To judge your filters, look at how many genes (loci) you keep, at the fraction of coding isoforms, and at the completeness of the resulting proteome with [BUSCO](https://busco.ezlab.org/) or [OMArk](https://github.com/DessimozLab/OMArk). And remember: the filtered GTF that you just produced (`results/03_sqanti_evidence/worm.filtered.gtf`) is exactly what SQANTI-evidence gives to AUGUSTUS as hints to annotate the genome.
 
 Want to know more? Check the [SQANTI3 wiki](https://github.com/ConesaLab/SQANTI3/wiki) and the [SQANTI-evidence repository](https://github.com/ConesaLab/SQANTI_evidence).
-
-![Picture of what happens if you use the SQANTI-colors right](__IMAGES__/ConesaColors_happy.jpg "Conesa Color")
-""".replace("__IMAGES__", IMAGES))
+""")
 
 notebook = {
     "cells": cells,

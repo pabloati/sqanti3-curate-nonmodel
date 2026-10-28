@@ -6,7 +6,7 @@ transcript exactly (gffcompare class "="). You will never have this for your
 own species: here it lets us see whether a filtering decision is good.
 
 Usage:
-    python scripts/score.py results/01_strict [results/02_rescue ...] --key data/celegans_chrI_answer_key.tsv
+    python scripts/score.py results/01_strict [results/02_relax_intrapriming ...] --key data/celegans_chrI_answer_key.tsv
     python scripts/score.py results/01_strict --key data/celegans_chrI_answer_key.tsv --losses
 """
 import argparse
@@ -58,17 +58,26 @@ def condition_name(reason):
     return na.group(1) if na else reason.split(":")[0]
 
 
+def reasons(run_dir, key_file, count_na=True):
+    """One row per discarded isoform: the conditions it failed, and whether it is real.
+    With count_na=False, a condition failed only because the value is missing
+    (e.g. no CDS_length in a non-coding isoform) is not counted."""
+    real = read_key(key_file)
+    df = pd.read_csv(find_file(run_dir, "_filtering_reasons.txt"), sep="\t")
+    counted = (lambda x: x.strip()) if count_na else (lambda x: x.strip() and "NA value in" not in x)
+    df["conditions"] = df["filter_reason"].fillna("").apply(
+        lambda r: sorted({condition_name(x) for x in r.split(";") if counted(x)}))
+    df["real"] = df["isoform"].isin(real)
+    return df[["isoform", "conditions", "real"]]
+
+
 def losses(run_dir, key_file):
     """For each condition: how many isoforms fail it, how many of those are real,
-    and how many real ones fail ONLY that condition (the ones a rescue rule could bring back)."""
-    real = read_key(key_file)
-    reasons = pd.read_csv(find_file(run_dir, "_filtering_reasons.txt"), sep="\t")
-    reasons["conditions"] = reasons["filter_reason"].fillna("").apply(
-        lambda r: sorted({condition_name(x) for x in r.split(";") if x.strip()}))
-    reasons["real"] = reasons["isoform"].isin(real)
+    and how many real ones fail ONLY that condition (the ones a relaxed rule could bring back)."""
+    discarded = reasons(run_dir, key_file)
     rows = []
-    for cond in sorted({c for cs in reasons["conditions"] for c in cs}):
-        fails = reasons[reasons["conditions"].apply(lambda cs: cond in cs)]
+    for cond in sorted({c for cs in discarded["conditions"] for c in cs}):
+        fails = discarded[discarded["conditions"].apply(lambda cs: cond in cs)]
         only = fails[fails["conditions"].apply(len) == 1]
         rows.append({"Condition": cond,
                      "Isoforms failing": len(fails),
